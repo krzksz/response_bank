@@ -48,6 +48,7 @@ module ResponseBank
           end
         end
       when 'br'
+        log("== content size: #{content.bytesize}")
         Brotli.deflate(content, mode: :text, quality: 7)
       else
         raise ArgumentError, "Unsupported encoding: #{encoding}"
