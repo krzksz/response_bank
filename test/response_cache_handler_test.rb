@@ -148,6 +148,26 @@ class ResponseCacheHandlerTest < Minitest::Test
     assert_equal(_status, status)
     assert_equal(_headers['Content-Type'], headers["Content-Type"])
     assert_nil(headers["Content-Encoding"])
+    assert_nil(controller.request.env['cacheable.compression_level']) # test backward compatibility when compression level is not set
+    assert_cache_miss(false, 'server')
+  end
+
+  def test_server_cache_hit_sets_compression_level_env
+    controller.request.env['response_bank.server_cache_encoding'] = 'gzip'
+    cache_entry = [200, {"Content-Type" => "text/html", "ETag" => handler.entity_tag_hash, "Content-Encoding" => 'br'}, "<body>cached output</body>", 1331765506, 9]
+    @cache_store.expects(:read).with(handler.cache_key_hash, raw: true).returns(MessagePack.dump(cache_entry))
+    controller.request.env['HTTP_ACCEPT_ENCODING'] = 'gzip'
+
+    _status, _headers, _body, _timestamp, _compression_level = cache_entry
+
+    ResponseBank.expects(:decompress).returns(_body).once
+
+    status, headers, _body = handler.run!
+
+    assert_equal(_status, status)
+    assert_equal(_headers['Content-Type'], headers["Content-Type"])
+    assert_nil(headers["Content-Encoding"])
+    assert_equal(9, controller.request.env['cacheable.compression_level'])
     assert_cache_miss(false, 'server')
   end
 

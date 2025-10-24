@@ -4,11 +4,31 @@ require 'response_bank/railtie' if defined?(Rails)
 require 'response_bank/response_cache_handler'
 require 'msgpack'
 require 'brotli'
+require 'benchmark'
 
 module ResponseBank
   class << self
     attr_accessor :cache_store
-    attr_writer :logger
+    attr_writer :logger, :compression_level
+
+    DEFAULT_BROTLI_COMPRESSION_LEVEL = 7
+
+    DEFAULT_COMPRESSION_LEVEL = -> (_env, headers) {
+      case headers['Content-Encoding']
+      when 'br'
+        DEFAULT_BROTLI_COMPRESSION_LEVEL
+      when 'gzip'
+        Zlib::BEST_COMPRESSION
+      end
+    }
+
+    def compression_level_for_request(env, headers)
+      if @compression_level
+        return @compression_level.respond_to?(:call) ? @compression_level.call(env, headers) : @compression_level
+      end
+
+      DEFAULT_COMPRESSION_LEVEL.call(env, headers)
+    end
 
     def log(message)
       @logger.info("[ResponseBank] #{message}")
@@ -30,13 +50,19 @@ module ResponseBank
       backing_cache_store.read(cache_key, raw: true)
     end
 
-    def compress(content, encoding = "br")
+    def measure
+      Benchmark.realtime do
+        yield
+      end * 1000 # milliseconds
+    end
+
+    def compress(content, encoding = "br", compression_level: nil)
       case encoding
       when 'gzip'
         attempts = 0
 
         begin
-          Zlib.gzip(content, level: Zlib::BEST_COMPRESSION)
+          Zlib.gzip(content, level: compression_level || Zlib::BEST_COMPRESSION)
         rescue Zlib::BufError
           # We get sporadic Zlib::BufError, so we retry once (https://github.com/ruby/zlib/issues/49)
           attempts += 1
@@ -48,7 +74,7 @@ module ResponseBank
           end
         end
       when 'br'
-        Brotli.deflate(content, mode: :text, quality: 7)
+        Brotli.deflate(content, mode: :text, quality: compression_level || DEFAULT_BROTLI_COMPRESSION_LEVEL)
       else
         raise ArgumentError, "Unsupported encoding: #{encoding}"
       end
