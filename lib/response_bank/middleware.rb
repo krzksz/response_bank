@@ -37,12 +37,21 @@ module ResponseBank
           body_compressed = nil
           if body_string && body_string != ""
             headers['Content-Encoding'] = content_encoding
-            body_compressed = ResponseBank.compress(body_string, content_encoding)
+            env["cacheable.compression_level"] = ResponseBank.compression_level_for_request(env, headers)
+            time = ResponseBank.measure do
+              body_compressed = ResponseBank.compress(
+                body_string,
+                content_encoding,
+                compression_level: env["cacheable.compression_level"],
+              )
+            end
+            ResponseBank.log("Compression time: #{time}ms")
+            env["cacheable.compression_time"] = time
           end
 
           cached_headers = headers.slice(*CACHEABLE_HEADERS)
           # Store result
-          cache_data = [status, cached_headers, body_compressed, timestamp]
+          cache_data = [status, cached_headers, body_compressed, timestamp, env["cacheable.compression_level"]]
 
           ResponseBank.write_to_cache(env['cacheable.key']) do
             payload = MessagePack.dump(cache_data)

@@ -119,7 +119,9 @@ module ResponseBank
         @env['cacheable.miss']  = false
         @env['cacheable.store'] = 'server'
 
-        status, headers, body, timestamp = hit
+        status, headers, body, timestamp, compression_level = hit
+
+        @env['cacheable.compression_level'] = compression_level
 
         @env['cacheable.locked'] ||= false
 

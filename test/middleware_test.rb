@@ -71,6 +71,16 @@ def cacheable_app(env)
   [200, { 'Content-Type' => 'text/plain' }, body]
 end
 
+def cacheable_app_with_long_response(env)
+  env['cacheable.cache'] = true
+  env['cacheable.miss']  = true
+  env['cacheable.key']   = 'etag_value'
+  env['cacheable.unversioned-key'] = 'cacheable_app_cache_key'
+
+  body = block_given? ? [yield] : ['a' * 100]
+  [200, { 'Content-Type' => 'text/plain' }, body]
+end
+
 def cacheable_app_limit_headers(env)
   env['cacheable.cache'] = true
   env['cacheable.miss']  = true
@@ -196,7 +206,8 @@ class MiddlewareTest < Minitest::Test
             200,
             {'Content-Type' => 'text/plain', 'ETag' => '"etag_value"', 'Content-Encoding' => 'br', 'Cache-Tags' => 'tag1, tag2'},
             ResponseBank.compress('Hi', 'br'),
-            424242
+            424242,
+            7
           ]
         ),
         raw: true,
@@ -223,7 +234,7 @@ class MiddlewareTest < Minitest::Test
     ResponseBank::Middleware.any_instance.stubs(timestamp: 424242)
     ResponseBank.cache_store.expects(:write).with(
       'cacheable_app_cache_key',
-        MessagePack.dump([200, {'Content-Type' => 'text/plain', 'ETag' => '"etag_value"', 'Content-Encoding' => 'br' }, ResponseBank.compress('Hi', 'br'), 424242]),
+        MessagePack.dump([200, {'Content-Type' => 'text/plain', 'ETag' => '"etag_value"', 'Content-Encoding' => 'br' }, ResponseBank.compress('Hi', 'br'), 424242, 7]),
         raw: true,
         expires_in: nil,
     ).once
@@ -244,6 +255,66 @@ class MiddlewareTest < Minitest::Test
     assert(!headers['Content-Encoding'])
   end
 
+  def test_cache_miss_and_store_with_custom_brotli_compression_level_block
+    ResponseBank.compression_level = ->(env, headers) { 1 }
+    ResponseBank::Middleware.any_instance.stubs(timestamp: 424242)
+    ResponseBank.cache_store.expects(:write).with(
+      'cacheable_app_cache_key',
+        MessagePack.dump([200, {'Content-Type' => 'text/plain', 'ETag' => '"etag_value"', 'Content-Encoding' => 'br' }, Brotli.deflate("a" * 100, mode: :text, quality: 1), 424242, 1]),
+        raw: true,
+        expires_in: nil,
+    ).once
+    @env['HTTP_ACCEPT_ENCODING'] = 'deflate, pkzip'
+
+    ware = ResponseBank::Middleware.new(method(:cacheable_app_with_long_response))
+    result = ware.call(@env)
+    headers = result[1]
+
+    assert(@env['cacheable.cache'])
+    assert(@env['cacheable.miss'])
+    assert(@env['cacheable.compression_time'])
+
+    assert_equal('"etag_value"', headers['ETag'])
+    assert_equal('miss', headers['X-Cache'])
+    assert_equal(1, @env['cacheable.compression_level'])
+    assert_nil(@env['cacheable.store'])
+
+    # no gzip support here
+    assert(!headers['Content-Encoding'])
+  ensure
+    ResponseBank.compression_level = nil
+  end
+
+  def test_cache_miss_and_store_with_custom_brotli_compression_level
+    ResponseBank.compression_level = 1
+    ResponseBank::Middleware.any_instance.stubs(timestamp: 424242)
+    ResponseBank.cache_store.expects(:write).with(
+      'cacheable_app_cache_key',
+        MessagePack.dump([200, {'Content-Type' => 'text/plain', 'ETag' => '"etag_value"', 'Content-Encoding' => 'br' }, Brotli.deflate("a" * 100, mode: :text, quality: 1), 424242, 1]),
+        raw: true,
+        expires_in: nil,
+    ).once
+    @env['HTTP_ACCEPT_ENCODING'] = 'deflate, pkzip'
+
+    ware = ResponseBank::Middleware.new(method(:cacheable_app_with_long_response))
+    result = ware.call(@env)
+    headers = result[1]
+
+    assert(@env['cacheable.cache'])
+    assert(@env['cacheable.miss'])
+    assert(@env['cacheable.compression_time'])
+
+    assert_equal('"etag_value"', headers['ETag'])
+    assert_equal('miss', headers['X-Cache'])
+    assert_equal(1, @env['cacheable.compression_level'])
+    assert_nil(@env['cacheable.store'])
+
+    # no gzip support here
+    assert(!headers['Content-Encoding'])
+  ensure
+    ResponseBank.compression_level = nil
+  end
+
   def test_cache_miss_and_store_with_shortened_cache_expiry
     @env['cacheable.versioned-cache-expiry'] = 30.seconds
 
@@ -261,7 +332,7 @@ class MiddlewareTest < Minitest::Test
     ResponseBank::Middleware.any_instance.stubs(timestamp: 424242)
     ResponseBank.cache_store.expects(:write).with(
       'moved_cache_key',
-        MessagePack.dump([ 301, {'Location' => 'http://shopify.com', 'Content-Type' => 'text/plain', 'ETag' => '"etag_value"'}, nil, 424242 ]),
+        MessagePack.dump([ 301, {'Location' => 'http://shopify.com', 'Content-Type' => 'text/plain', 'ETag' => '"etag_value"'}, nil, 424242, nil]),
         raw: true,
         expires_in: nil,
     ).once
@@ -284,7 +355,7 @@ class MiddlewareTest < Minitest::Test
     ResponseBank::Middleware.any_instance.stubs(timestamp: 424242)
     ResponseBank.cache_store.expects(:write).with(
       'cacheable_app_cache_key',
-        MessagePack.dump([200, {'Content-Type' => 'text/plain', 'ETag' => '"etag_value"', 'Content-Encoding' => 'gzip'}, ResponseBank.compress('Hi', 'gzip'), 424242]),
+        MessagePack.dump([200, {'Content-Type' => 'text/plain', 'ETag' => '"etag_value"', 'Content-Encoding' => 'gzip'}, ResponseBank.compress('Hi', 'gzip'), 424242, 9]),
         raw: true,
         expires_in: nil,
     ).once
@@ -311,7 +382,7 @@ class MiddlewareTest < Minitest::Test
     ResponseBank::Middleware.any_instance.stubs(timestamp: 424242)
     ResponseBank.cache_store.expects(:write).with(
       'cacheable_app_cache_key',
-        MessagePack.dump([200, {'Content-Type' => 'text/plain', 'ETag' => '"etag_value"', 'Content-Encoding' => 'br' }, ResponseBank.compress('Hi', 'br'), 424242]),
+        MessagePack.dump([200, {'Content-Type' => 'text/plain', 'ETag' => '"etag_value"', 'Content-Encoding' => 'br' }, ResponseBank.compress('Hi', 'br'), 424242, 7]),
         raw: true,
         expires_in: nil,
     ).once
