@@ -83,18 +83,25 @@ module ResponseBank
     end
 
     def try_to_serve_from_cache
+      response = read_from_cache
+      return response if response
+
+      # No cache hit; this request cannot be handled from cache.
+      # Yield to the controller and mark for writing into cache.
+      refill_cache
+    end
+
+    def read_from_cache
       # Etag
       unless @skip_browser_cache
         response = serve_from_browser_cache(entity_tag_hash, @env['HTTP_IF_NONE_MATCH'])
         return response if response
       end
 
-      response = serve_from_cache(cache_key_hash, @serve_unversioned ? "*" : entity_tag_hash, @cache_age_tolerance)
-      return response if response
-
-      # No cache hit; this request cannot be handled from cache.
-      # Yield to the controller and mark for writing into cache.
-      refill_cache
+      serve_from_cache(cache_key_hash, @serve_unversioned ? "*" : entity_tag_hash, @cache_age_tolerance)
+    rescue => exception
+      handle_cache_exception(exception)
+      nil
     end
 
     def serve_from_browser_cache(entity_tag, if_none_match)
@@ -209,6 +216,18 @@ module ResponseBank
       ResponseBank.log("Refilling cache")
 
       @cache_miss_block.call
+    end
+
+    def handle_cache_exception(exception)
+      ResponseBank.log("Cache operation failed: #{exception.class} - #{exception.message}")
+
+      if @env['response_bank.on_exception']
+        begin
+          @env['response_bank.on_exception'].call(exception)
+        rescue => handler_exception
+          ResponseBank.log("Exception handler failed: #{handler_exception.class} - #{handler_exception.message}")
+        end
+      end
     end
   end
 end

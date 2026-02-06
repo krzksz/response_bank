@@ -381,4 +381,65 @@ class ResponseCacheHandlerTest < Minitest::Test
 
     body
   end
+
+  def test_exception_during_cache_read_falls_back_to_refill
+    @cache_store.expects(:read).raises(StandardError.new("Cache store is down"))
+    ResponseBank.stubs(:log)
+    ResponseBank.expects(:log).with(includes("Cache operation failed")).once
+
+    _, _, body = handler.run!
+    assert_equal('dynamic output', body)
+    assert_cache_miss(true, nil)
+  end
+
+  def test_exception_during_deserialization_falls_back_to_refill
+    @cache_store.expects(:read).returns("invalid msgpack data")
+    MessagePack.expects(:load).raises(MessagePack::MalformedFormatError.new("invalid data"))
+    ResponseBank.stubs(:log)
+    ResponseBank.expects(:log).with(includes("Cache operation failed")).once
+
+    _, _, body = handler.run!
+    assert_equal('dynamic output', body)
+    assert_cache_miss(true, nil)
+  end
+
+  def test_exception_during_decompression_falls_back_to_refill
+    @cache_store.expects(:read).returns(page_cache_entry(true, 'br'))
+    controller.request.env['HTTP_ACCEPT_ENCODING'] = 'gzip'
+    ResponseBank.expects(:decompress).raises(Brotli::Error.new("decompression failed"))
+    ResponseBank.stubs(:log)
+    ResponseBank.expects(:log).with(includes("Cache operation failed")).once
+
+    _, _, body = handler.run!
+    assert_equal('dynamic output', body)
+    assert_cache_miss(true, :anything)
+  end
+
+  def test_custom_exception_handler_is_called
+    exception_handled = false
+    exception_message = nil
+
+    controller.request.env['response_bank.on_exception'] = ->(e) {
+      exception_handled = true
+      exception_message = e.message
+    }
+
+    @cache_store.expects(:read).raises(StandardError.new("Cache store is down"))
+    ResponseBank.stubs(:log)
+    handler.run!
+
+    assert(exception_handled, "Custom exception handler should have been called")
+    assert_equal("Cache store is down", exception_message)
+  end
+
+  def test_exception_in_custom_handler_is_caught
+    controller.request.env['response_bank.on_exception'] = ->(e) { raise "Handler itself failed" }
+
+    @cache_store.expects(:read).raises(StandardError.new("Cache store is down"))
+    ResponseBank.stubs(:log)
+    ResponseBank.expects(:log).with(includes("Exception handler failed")).once
+
+    _, _, body = handler.run!
+    assert_equal('dynamic output', body)
+  end
 end
