@@ -38,7 +38,8 @@ module ResponseBank
             body.each { |part| body_string << part }
           end
 
-          body_compressed = nil
+          begin
+            body_compressed = nil
           metadata = nil
           if body_string && body_string != ""
             headers['Content-Encoding'] = content_encoding
@@ -97,6 +98,17 @@ module ResponseBank
               # Remove content-encoding header for response with compressed content
               headers.delete('Content-Encoding')
               body = [ResponseBank::BrotliSpliceSlot.replace_plain_body(env, body_string, metadata)] if metadata
+            end
+            end
+          rescue => exception
+            headers.delete('Content-Encoding')
+            ResponseBank.log("Failed to write to cache: #{exception.class} - #{exception.message}")
+            if env['response_bank.on_exception']
+              begin
+                env['response_bank.on_exception'].call(exception)
+              rescue => handler_exception
+                ResponseBank.log("Exception handler failed: #{handler_exception.class} - #{handler_exception.message}")
+              end
             end
           end
         end
