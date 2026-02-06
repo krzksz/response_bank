@@ -37,7 +37,6 @@ module ResponseBank
           begin
             body_compressed = nil
             if body_string && body_string != ""
-              headers['Content-Encoding'] = content_encoding
               env["cacheable.compression_level"] = ResponseBank.compression_level_for_request(env, headers)
               time = ResponseBank.measure do
                 body_compressed = ResponseBank.compress(
@@ -48,6 +47,7 @@ module ResponseBank
               end
               ResponseBank.log("Compression time: #{time}ms")
               env["cacheable.compression_time"] = time
+              headers['Content-Encoding'] = content_encoding
             end
 
             cached_headers = headers.slice(*CACHEABLE_HEADERS)
@@ -75,7 +75,7 @@ module ResponseBank
               end
             end
           rescue => exception
-            headers.delete('Content-Encoding')
+            headers.delete('Content-Encoding') if body_compressed
             ResponseBank.log("Failed to write to cache: #{exception.class} - #{exception.message}")
             if env['response_bank.on_exception']
               begin

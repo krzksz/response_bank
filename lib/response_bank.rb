@@ -13,8 +13,8 @@ module ResponseBank
 
     DEFAULT_BROTLI_COMPRESSION_LEVEL = 7
 
-    DEFAULT_COMPRESSION_LEVEL = -> (_env, headers) {
-      case headers['Content-Encoding']
+    DEFAULT_COMPRESSION_LEVEL = -> (env, _headers) {
+      case env['response_bank.server_cache_encoding']
       when 'br'
         DEFAULT_BROTLI_COMPRESSION_LEVEL
       when 'gzip'
