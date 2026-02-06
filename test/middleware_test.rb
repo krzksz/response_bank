@@ -430,4 +430,81 @@ class MiddlewareTest < Minitest::Test
     assert_equal('client', @env['cacheable.store'])
     assert_equal('"etag_value"', headers['ETag'])
   end
+
+  def test_exception_during_compression_does_not_fail_request
+    ResponseBank.expects(:compress).raises(StandardError.new("Compression failed"))
+    ResponseBank.stubs(:log)
+    ResponseBank.expects(:log).with(includes("Failed to write to cache")).once
+
+    ware = ResponseBank::Middleware.new(method(:cacheable_app))
+    result = ware.call(@env)
+
+    # Should still return 200 OK with uncompressed body and no Content-Encoding
+    assert_equal(200, result[0])
+    assert_nil(result[1]['Content-Encoding'])
+    assert_equal('Hi', result[2].join)
+  end
+
+  def test_exception_during_serialization_does_not_fail_request
+    ResponseBank.expects(:compress).returns("compressed")
+    MessagePack.expects(:dump).raises(StandardError.new("Serialization failed"))
+    ResponseBank.stubs(:log)
+    ResponseBank.expects(:log).with(includes("Failed to write to cache")).once
+
+    ware = ResponseBank::Middleware.new(method(:cacheable_app))
+    result = ware.call(@env)
+
+    # Should still return 200 OK with uncompressed body and no Content-Encoding
+    assert_equal(200, result[0])
+    assert_nil(result[1]['Content-Encoding'])
+    assert_equal('Hi', result[2].join)
+  end
+
+  def test_exception_during_cache_write_does_not_fail_request
+    ResponseBank.cache_store.expects(:write).raises(StandardError.new("Cache store is down"))
+    ResponseBank.stubs(:log)
+    ResponseBank.expects(:log).with(includes("Failed to write to cache")).once
+
+    ware = ResponseBank::Middleware.new(method(:cacheable_app))
+    result = ware.call(@env)
+
+    # Should still return 200 OK
+    assert_equal(200, result[0])
+    assert_equal('Hi', result[2].join)
+  end
+
+  def test_custom_exception_handler_called_on_middleware_failure
+    exception_handled = false
+    exception_message = nil
+
+    @env['response_bank.on_exception'] = ->(e) {
+      exception_handled = true
+      exception_message = e.message
+    }
+
+    ResponseBank.expects(:compress).raises(StandardError.new("Compression failed"))
+    ResponseBank.stubs(:log)
+
+    ware = ResponseBank::Middleware.new(method(:cacheable_app))
+    result = ware.call(@env)
+
+    assert(exception_handled, "Custom exception handler should have been called")
+    assert_equal("Compression failed", exception_message)
+    assert_equal(200, result[0])
+  end
+
+  def test_exception_in_middleware_custom_handler_is_caught
+    @env['response_bank.on_exception'] = ->(e) { raise "Handler itself failed" }
+
+    ResponseBank.expects(:compress).raises(StandardError.new("Compression failed"))
+    ResponseBank.stubs(:log)
+    ResponseBank.expects(:log).with(includes("Exception handler failed")).once
+
+    ware = ResponseBank::Middleware.new(method(:cacheable_app))
+    result = ware.call(@env)
+
+    # Should still return 200 OK even if exception handler fails
+    assert_equal(200, result[0])
+    assert_equal('Hi', result[2].join)
+  end
 end

@@ -34,43 +34,55 @@ module ResponseBank
             body.each { |part| body_string << part }
           end
 
-          body_compressed = nil
-          if body_string && body_string != ""
-            headers['Content-Encoding'] = content_encoding
-            env["cacheable.compression_level"] = ResponseBank.compression_level_for_request(env, headers)
-            time = ResponseBank.measure do
-              body_compressed = ResponseBank.compress(
-                body_string,
-                content_encoding,
-                compression_level: env["cacheable.compression_level"],
+          begin
+            body_compressed = nil
+            if body_string && body_string != ""
+              headers['Content-Encoding'] = content_encoding
+              env["cacheable.compression_level"] = ResponseBank.compression_level_for_request(env, headers)
+              time = ResponseBank.measure do
+                body_compressed = ResponseBank.compress(
+                  body_string,
+                  content_encoding,
+                  compression_level: env["cacheable.compression_level"],
+                )
+              end
+              ResponseBank.log("Compression time: #{time}ms")
+              env["cacheable.compression_time"] = time
+            end
+
+            cached_headers = headers.slice(*CACHEABLE_HEADERS)
+            # Store result
+            cache_data = [status, cached_headers, body_compressed, timestamp, env["cacheable.compression_level"]]
+
+            ResponseBank.write_to_cache(env['cacheable.key']) do
+              payload = MessagePack.dump(cache_data)
+              ResponseBank.write_to_backing_cache_store(
+                env,
+                env['cacheable.unversioned-key'],
+                payload,
+                expires_in: env['cacheable.versioned-cache-expiry'],
               )
             end
-            ResponseBank.log("Compression time: #{time}ms")
-            env["cacheable.compression_time"] = time
-          end
 
-          cached_headers = headers.slice(*CACHEABLE_HEADERS)
-          # Store result
-          cache_data = [status, cached_headers, body_compressed, timestamp, env["cacheable.compression_level"]]
-
-          ResponseBank.write_to_cache(env['cacheable.key']) do
-            payload = MessagePack.dump(cache_data)
-            ResponseBank.write_to_backing_cache_store(
-              env,
-              env['cacheable.unversioned-key'],
-              payload,
-              expires_in: env['cacheable.versioned-cache-expiry'],
-            )
-          end
-
-          # since we had to generate the compressed version already we may
-          # as well serve it if the client wants it
-          if body_compressed
-            if env['HTTP_ACCEPT_ENCODING'].to_s.include?(content_encoding)
-              body = [body_compressed]
-            else
-              # Remove content-encoding header for response with compressed content
-              headers.delete('Content-Encoding')
+            # since we had to generate the compressed version already we may
+            # as well serve it if the client wants it
+            if body_compressed
+              if env['HTTP_ACCEPT_ENCODING'].to_s.include?(content_encoding)
+                body = [body_compressed]
+              else
+                # Remove content-encoding header for response with compressed content
+                headers.delete('Content-Encoding')
+              end
+            end
+          rescue => exception
+            headers.delete('Content-Encoding')
+            ResponseBank.log("Failed to write to cache: #{exception.class} - #{exception.message}")
+            if env['response_bank.on_exception']
+              begin
+                env['response_bank.on_exception'].call(exception)
+              rescue => handler_exception
+                ResponseBank.log("Exception handler failed: #{handler_exception.class} - #{handler_exception.message}")
+              end
             end
           end
         end
