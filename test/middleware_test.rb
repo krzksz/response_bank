@@ -81,6 +81,15 @@ def cacheable_app_with_long_response(env)
   [200, { 'Content-Type' => 'text/plain' }, body]
 end
 
+def cacheable_html_app(env)
+  env['cacheable.cache'] = true
+  env['cacheable.miss']  = true
+  env['cacheable.key']   = 'etag_value'
+  env['cacheable.unversioned-key'] = 'cacheable_html_app_cache_key'
+
+  [200, { 'Content-Type' => 'text/html' }, ['<html><head></head><body>Hi</body></html>']]
+end
+
 def cacheable_app_limit_headers(env)
   env['cacheable.cache'] = true
   env['cacheable.miss']  = true
@@ -121,6 +130,54 @@ def client_hit_app(env)
 
   body = block_given? ? [yield] : ['']
   [304, { 'Content-Type' => 'text/plain' }, body]
+end
+
+# An injector that addresses the slot by byte offset/length (like the README example
+# and the real storefront injector), so it can splice the replacement into the
+# *uncompressed* body served on the miss -> plain-body branch. The string-substitution
+# HtmlMetadataInjector in test_helper only matches once the Brotli body is decompressed.
+class OffsetHtmlMetadataInjector
+  include ResponseBank::BrotliSpliceInjector
+
+  CONTEXT_SUFFIX = "\r\n"
+
+  def initialize(placeholder:, replacement:)
+    @placeholder = placeholder
+    @replacement = replacement
+  end
+
+  def prepare_response_bank_brotli_splice(body, _headers)
+    tag = %(<meta name="shopify-y" content="#{@placeholder}#{CONTEXT_SUFFIX}">)
+    html = body.sub('</head>', "#{tag}</head>")
+    offset = html.b.index(@placeholder)
+
+    {
+      body: html,
+      slots: [
+        {
+          name: 'shopify_y',
+          offset: offset,
+          length: @placeholder.bytesize + CONTEXT_SUFFIX.bytesize,
+        },
+      ],
+    }
+  end
+
+  def response_bank_brotli_splice_replacement(slot)
+    @replacement if @replacement.bytesize == slot.fetch('replacement_length')
+  end
+
+  def replace_response_bank_brotli_splice_placeholders(body, slots)
+    slots.reduce(body) do |current, slot|
+      replacement = response_bank_brotli_splice_replacement(slot)
+      next current unless replacement
+
+      offset = slot.fetch('html_placeholder_offset')
+      length = slot.fetch('html_placeholder_length')
+      suffix = slot.fetch('context_suffix', CONTEXT_SUFFIX)
+      current.byteslice(0, offset) + replacement + suffix + current.byteslice(offset + length, current.bytesize)
+    end
+  end
 end
 
 class MiddlewareTest < Minitest::Test
@@ -403,6 +460,104 @@ class MiddlewareTest < Minitest::Test
     # gzip support!
     assert_equal('br', headers['Content-Encoding'])
     assert_equal([ResponseBank.compress("Hi", 'br')], result[2])
+  end
+
+  def test_cache_miss_uses_brotli_splice_when_injector_returns_slot
+    ResponseBank::Middleware.any_instance.stubs(timestamp: 424242)
+    injector = HtmlMetadataInjector.new(
+      placeholder: '00000000-0000-0000-0000-000000000000',
+      replacement: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    )
+
+    ware = ResponseBank::Middleware.new(method(:cacheable_html_app), ->(_env) { injector })
+    result = ware.call(@env)
+    headers = result[1]
+
+    captured_payload = MessagePack.load(ResponseBank.cache_store.read('cacheable_html_app_cache_key', raw: true))
+    status, cached_headers, cached_body, timestamp, compression_level, metadata = captured_payload
+    slot = metadata.fetch('brotli_splice').fetch('slots').first
+
+    assert_equal(200, status)
+    assert_equal({'Content-Type' => 'text/html', 'ETag' => '"etag_value"', 'Content-Encoding' => 'br'}, cached_headers)
+    assert_equal(424242, timestamp)
+    assert_equal(7, compression_level)
+    assert_equal('shopify_y', slot['name'])
+    assert_equal(36, slot['replacement_length'])
+    assert_equal(38, slot['html_placeholder_length'])
+    assert_equal('br', headers['Content-Encoding'])
+    assert_equal('miss', headers['X-Cache'])
+
+    decoded_cached_body = Brotli.inflate(cached_body)
+    assert_includes(decoded_cached_body, '00000000-0000-0000-0000-000000000000')
+    refute_includes(decoded_cached_body, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+
+    decoded_served_body = Brotli.inflate(result[2].first)
+    assert_includes(decoded_served_body, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+  end
+
+  def test_cache_miss_with_injector_serves_spliced_plain_body_to_client_without_br
+    ResponseBank::Middleware.any_instance.stubs(timestamp: 424242)
+    @env['HTTP_ACCEPT_ENCODING'] = 'deflate, pkzip' # accepts neither br nor gzip
+
+    injector = OffsetHtmlMetadataInjector.new(
+      placeholder: '00000000-0000-0000-0000-000000000000',
+      replacement: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    )
+
+    ware = ResponseBank::Middleware.new(method(:cacheable_html_app), ->(_env) { injector })
+    result = ware.call(@env)
+    headers = result[1]
+    served_body = result[2].first
+
+    # The server still Brotli-encodes for its cache -- check_encoding defaults to 'br'
+    # even though this client accepts neither br nor gzip -- and stores the neutral
+    # placeholder plus the slot metadata.
+    captured_payload = MessagePack.load(ResponseBank.cache_store.read('cacheable_html_app_cache_key', raw: true))
+    _status, cached_headers, cached_body, _timestamp, _compression_level, metadata = captured_payload
+    assert_equal('br', cached_headers['Content-Encoding'])
+    assert(metadata, 'expected brotli_splice metadata to be cached')
+    assert_includes(Brotli.inflate(cached_body), '00000000-0000-0000-0000-000000000000')
+
+    # Because the client cannot accept br, the middleware takes the
+    # `replace_plain_body(...) if metadata` branch (reachable -- not dead code): it
+    # serves an uncompressed body with the per-request value spliced in and drops
+    # Content-Encoding.
+    assert_nil(headers['Content-Encoding'])
+    assert_equal('miss', headers['X-Cache'])
+    assert_includes(served_body, '<body>Hi</body>')
+    assert_includes(served_body, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+    refute_includes(served_body, '00000000-0000-0000-0000-000000000000')
+  end
+
+  def test_configured_brotli_splice_injector_is_installed_before_app_call
+    injector = HtmlMetadataInjector.new(
+      placeholder: '00000000-0000-0000-0000-000000000000',
+      replacement: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    )
+    app = lambda do |env|
+      assert_same(injector, env.fetch(ResponseBank::BrotliSpliceSlot::INJECTOR_ENV_KEY))
+      cacheable_html_app(env)
+    end
+
+    ware = ResponseBank::Middleware.new(app, ->(_env) { injector })
+
+    ware.call(@env)
+  end
+
+  def test_cache_miss_falls_back_to_standard_brotli_when_no_injector
+    ResponseBank::Middleware.any_instance.stubs(timestamp: 424242)
+    ResponseBank.cache_store.expects(:write).with(
+      'cacheable_html_app_cache_key',
+      MessagePack.dump([200, {'Content-Type' => 'text/html', 'ETag' => '"etag_value"', 'Content-Encoding' => 'br'}, ResponseBank.compress('<html><head></head><body>Hi</body></html>', 'br'), 424242, 7]),
+      raw: true,
+      expires_in: nil,
+    ).once
+
+    ware = ResponseBank::Middleware.new(method(:cacheable_html_app))
+    result = ware.call(@env)
+
+    assert_equal('br', result[1]['Content-Encoding'])
+    assert_equal([ResponseBank.compress('<html><head></head><body>Hi</body></html>', 'br')], result[2])
   end
 
   def test_cache_hit_server
