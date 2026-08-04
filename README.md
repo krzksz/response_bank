@@ -241,6 +241,29 @@ Advanced integrations can still install the per-request injector directly in the
 env[ResponseBank::BrotliSpliceSlot::INJECTOR_ENV_KEY] = injector
 ```
 
+## Exception Handling
+
+ResponseBank handles all exceptions gracefully during cache operations. If an exception occurs while reading from cache, deserializing cached data, or writing to cache, the middleware will:
+
+1. **On cache read failures**: Fall back to rendering the page normally (as if it was a cache miss).
+2. **On cache write failures**: Still serve the successfully rendered page to the user, but log the cache write failure.
+
+This ensures that issues with cache stores (Redis/Memcached down), serialization errors, or compression/decompression failures don't cause 500 errors for your users.
+
+### Custom Exception Handlers
+
+You can set a custom exception handler in the Rack environment to be notified when cache operations fail (e.g., to report to Bugsnag, Sentry, etc.):
+
+```ruby
+# In an initializer or middleware
+class MyMiddleware
+  def call(env)
+    env['response_bank.on_exception'] = ->(e) { Bugsnag.notify(e) }
+    @app.call(env)
+  end
+end
+```
+
 ## License
 
 ResponseBank is released under the [MIT License](LICENSE.txt).
