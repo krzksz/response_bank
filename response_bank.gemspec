@@ -21,6 +21,7 @@ Gem::Specification.new do |s|
 
   s.add_runtime_dependency("msgpack")
   s.add_runtime_dependency("brotli")
+  s.add_runtime_dependency("benchmark")
 
   # brotli_splice is optional for consumers: only apps that opt into Brotli splice
   # slots need this native extension, so it is not a runtime dependency (they add it
