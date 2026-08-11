@@ -121,6 +121,22 @@ def already_cached_app(env)
   [200, { 'Content-Type' => 'text/plain' }, body]
 end
 
+def prepare_deferred_cache_miss(env)
+  env['cacheable.cache'] = true
+  env['cacheable.miss'] = true
+  env['cacheable.locked'] = true
+  env[ResponseBank::DeferredStore::LOCK_OWNED_ENV_KEY] = true
+  env['cacheable.key'] = 'etag_value'
+  env['cacheable.unversioned-key'] = 'deferred_store_app_cache_key'
+end
+
+def deferred_store_app(env)
+  prepare_deferred_cache_miss(env)
+  env['test.deferred_store'] = ResponseBank.defer_store(env, timestamp: 424242)
+
+  [200, { 'Content-Type' => 'text/plain', 'rack.hijack' => proc {} }, []]
+end
+
 def client_hit_app(env)
   env['cacheable.cache'] = true
   env['cacheable.miss']  = false
@@ -177,6 +193,39 @@ class OffsetHtmlMetadataInjector
       suffix = slot.fetch('context_suffix', CONTEXT_SUFFIX)
       current.byteslice(0, offset) + replacement + suffix + current.byteslice(offset + length, current.bytesize)
     end
+  end
+end
+
+class DeferredLifecycleApp
+  attr_reader :deferred_store, :render_count
+
+  def initialize
+    @render_count = 0
+  end
+
+  def call(env)
+    handler = ResponseBank::ResponseCacheHandler.new(
+      key_data: { path: '/deferred' },
+      version_data: { version: 1 },
+      env: env,
+      cache_age_tolerance: 0,
+      serve_unversioned: false,
+      headers: {},
+    ) do
+      @render_count += 1
+      @deferred_store = ResponseBank.defer_store(env, timestamp: 424242)
+      [
+        200,
+        {
+          'Content-Type' => 'text/html',
+          'Cache-Control' => 'no-cache, no-store',
+          'rack.hijack' => proc {},
+        },
+        [],
+      ]
+    end
+
+    handler.run!
   end
 end
 
@@ -310,6 +359,17 @@ class MiddlewareTest < Minitest::Test
 
     # no gzip support here
     assert(!headers['Content-Encoding'])
+  end
+
+  def test_cache_writer_does_not_use_the_write_hook_return_value
+    ResponseBank.stubs(:write_to_cache).yields.returns(nil)
+
+    ware = ResponseBank::Middleware.new(method(:cacheable_app))
+    status, headers, body = ware.call(@env)
+
+    assert_equal(200, status)
+    assert_equal('br', headers['Content-Encoding'])
+    assert_equal('Hi', Brotli.inflate(body.first))
   end
 
   def test_cache_miss_and_store_with_custom_brotli_compression_level_block
@@ -661,5 +721,135 @@ class MiddlewareTest < Minitest::Test
     # Should still return 200 OK even if exception handler fails
     assert_equal(200, result[0])
     assert_equal('Hi', result[2].join)
+  end
+
+  def test_cache_miss_arms_a_deferred_store_without_emitting_an_etag
+    ResponseBank.cache_store.expects(:write).never
+
+    ware = ResponseBank::Middleware.new(method(:deferred_store_app))
+    status, headers, body = ware.call(@env)
+
+    assert_equal(200, status)
+    assert_nil(headers['ETag'])
+    assert_equal('miss', headers['X-Cache'])
+    assert_equal([], body)
+    assert_nil(headers['Content-Encoding'])
+    assert_nil(@env['cacheable.compression_level'])
+  end
+
+  def test_middleware_tolerates_a_deferred_store_aborted_before_arming
+    app = lambda do |env|
+      prepare_deferred_cache_miss(env)
+      store = ResponseBank.defer_store(env)
+      store.abort
+      [200, { 'Content-Type' => 'text/plain' }, ['fallback']]
+    end
+    ResponseBank.cache_store.expects(:write).never
+    ResponseBank.expects(:release_lock).with('etag_value').once
+
+    status, headers, body = ResponseBank::Middleware.new(app).call(@env)
+
+    assert_equal(200, status)
+    assert_nil(headers['ETag'])
+    assert_equal(['fallback'], body)
+  end
+
+  def test_middleware_aborts_a_deferred_store_when_the_app_raises
+    app = lambda do |env|
+      prepare_deferred_cache_miss(env)
+      ResponseBank.defer_store(env)
+      raise StandardError, 'render failed'
+    end
+    ResponseBank.expects(:release_lock).with('etag_value').once
+
+    error = assert_raises(StandardError) do
+      ResponseBank::Middleware.new(app).call(@env)
+    end
+
+    assert_equal('render failed', error.message)
+  end
+
+  def test_deferred_store_writes_copied_headers_with_etag_and_captured_timestamp
+    ware = ResponseBank::Middleware.new(method(:deferred_store_app))
+    _status, live_headers, = ware.call(@env)
+    cached_headers = { 'Content-Type' => 'text/plain' }
+
+    stored = @env.fetch('test.deferred_store').complete(headers: cached_headers, body: 'Hi')
+
+    assert(stored)
+    assert_equal({ 'Content-Type' => 'text/plain' }, cached_headers)
+    assert_nil(live_headers['ETag'])
+    payload = MessagePack.load(ResponseBank.cache_store.read('deferred_store_app_cache_key', raw: true))
+    status, headers, body, timestamp, compression_level = payload
+    assert_equal(200, status)
+    assert_equal(
+      { 'Content-Type' => 'text/plain', 'ETag' => '"etag_value"', 'Content-Encoding' => 'br' },
+      headers,
+    )
+    assert_equal('Hi', Brotli.inflate(body))
+    assert_equal(424242, timestamp)
+    assert_equal(7, compression_level)
+  end
+
+  def test_deferred_miss_completion_is_served_by_following_cache_hits
+    ResponseBank.stubs(:acquire_lock).returns(true)
+    app = DeferredLifecycleApp.new
+    injector = lambda do |env|
+      OffsetHtmlMetadataInjector.new(
+        placeholder: '00000000-0000-0000-0000-000000000000',
+        replacement: env.fetch('HTTP_SHOPIFY_Y'),
+      )
+    end
+    ware = ResponseBank::Middleware.new(app, injector)
+    first_env = request_env(encoding: 'br', shopify_y: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+
+    first_status, first_headers, = ware.call(first_env)
+
+    assert_equal(200, first_status)
+    assert_nil(first_headers['ETag'])
+    assert_equal('no-cache, no-store', first_headers['Cache-Control'])
+    assert_equal('miss', first_headers['X-Cache'])
+    assert(
+      app.deferred_store.complete(
+        headers: { 'Content-Type' => 'text/html' },
+        body: '<html><head></head><body>Hi</body></html>',
+      ),
+    )
+
+    br_status, br_headers, br_body = ware.call(
+      request_env(encoding: 'br', shopify_y: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'),
+    )
+    assert_equal(200, br_status)
+    assert_equal('hit, server', br_headers['X-Cache'])
+    assert_equal('br', br_headers['Content-Encoding'])
+    assert_includes(Brotli.inflate(br_body.first), 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb')
+    refute_includes(Brotli.inflate(br_body.first), 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa')
+
+    plain_status, plain_headers, plain_body = ware.call(
+      request_env(encoding: nil, shopify_y: 'cccccccc-cccc-cccc-cccc-cccccccccccc'),
+    )
+    assert_equal(200, plain_status)
+    assert_equal('hit, server', plain_headers['X-Cache'])
+    assert_nil(plain_headers['Content-Encoding'])
+    assert_includes(plain_body.first, 'cccccccc-cccc-cccc-cccc-cccccccccccc')
+
+    etag = plain_headers.fetch('ETag')
+    conditional_env = request_env(encoding: nil, shopify_y: 'dddddddd-dddd-dddd-dddd-dddddddddddd')
+    conditional_env['HTTP_IF_NONE_MATCH'] = etag
+    conditional_status, conditional_headers, conditional_body = ware.call(conditional_env)
+    assert_equal(304, conditional_status)
+    assert_equal(etag, conditional_headers['ETag'])
+    assert_equal('hit, client', conditional_headers['X-Cache'])
+    assert_equal([], conditional_body)
+    assert_equal(1, app.render_count)
+  end
+
+  private
+
+  def request_env(encoding:, shopify_y:)
+    Rack::MockRequest.env_for('http://example.com/deferred').tap do |env|
+      env['HTTP_ACCEPT_ENCODING'] = encoding if encoding
+      env['HTTP_SHOPIFY_Y'] = shopify_y
+    end
   end
 end

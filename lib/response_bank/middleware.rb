@@ -1,11 +1,13 @@
 # frozen_string_literal: true
 require 'response_bank/brotli_splice_slot'
+require 'response_bank/cache_policy'
+require 'response_bank/cache_writer'
+require 'response_bank/deferred_store'
 
 module ResponseBank
   class Middleware
-    # Limit the cached headers
-    # TODO: Make this lowercase/case-insentitive as per rfc2616 §4.2
-    CACHEABLE_HEADERS = ["Location", "Content-Type", "ETag", "Content-Encoding", "Last-Modified", "Cache-Control", "Expires", "Link", "Surrogate-Keys", "Cache-Tags", "Speculation-Rules"].freeze
+    CACHEABLE_HEADERS = ResponseBank::CACHEABLE_HEADERS
+    CACHEABLE_STATUSES = ResponseBank::CACHEABLE_STATUSES
 
     REQUESTED_WITH = "HTTP_X_REQUESTED_WITH"
     ACCEPT = "HTTP_ACCEPT"
@@ -22,86 +24,48 @@ module ResponseBank
 
       content_encoding = env['response_bank.server_cache_encoding'] = ResponseBank.check_encoding(env)
 
-      status, headers, body = @app.call(env)
+      status, headers, body = begin
+        @app.call(env)
+      rescue StandardError
+        ResponseBank::DeferredStore.from_env(env)&.abort
+        raise
+      end
+      deferred_store = ResponseBank::DeferredStore.from_env(env)
+      ResponseBank::DeferredStore.arm_from_middleware(env, status: status, headers: headers)
 
       if env['cacheable.cache']
-        if [200, 404, 301, 304].include?(status)
+        if [200, 404, 301, 304].include?(status) && !deferred_store
           headers['ETag'] = %{"#{env['cacheable.key']}"}
         end
 
-        if [200, 404, 301].include?(status) && env['cacheable.miss']
-          # Flatten down the result so that it can be stored to memcached.
-          if body.is_a?(String)
-            body_string = body
-          else
-            body_string = +""
-            body.each { |part| body_string << part }
-          end
-
+        if CACHEABLE_STATUSES.include?(status) && env['cacheable.miss'] && !deferred_store
+          body_string = CacheWriter.flatten(body)
+          stored = nil
           begin
-            body_compressed = nil
-          metadata = nil
-          if body_string && body_string != ""
-            env["cacheable.compression_level"] = ResponseBank.compression_level_for_request(env, headers)
-            time = ResponseBank.measure do
-              encoded_body = if content_encoding == 'br'
-                ResponseBank::BrotliSpliceSlot.encode_body(
-                  env,
-                  body_string,
-                  headers,
-                  compression_level: env["cacheable.compression_level"],
-                )
-              end
-
-              if encoded_body
-                body_string = encoded_body.body
-                body_compressed = encoded_body.compressed_body
-                metadata = encoded_body.metadata
-              else
-                body_compressed = ResponseBank.compress(
-                  body_string,
-                  content_encoding,
-                  compression_level: env["cacheable.compression_level"],
-                )
-              end
-            end
-            ResponseBank.log("Compression time: #{time}ms")
-            env["cacheable.compression_time"] = time
-            headers['Content-Encoding'] = content_encoding
-          end
-
-          cached_headers = headers.slice(*CACHEABLE_HEADERS)
-          # Store result
-          cache_data = [status, cached_headers, body_compressed, timestamp, env["cacheable.compression_level"]]
-          cache_data << metadata if metadata
-
-          ResponseBank.write_to_cache(env['cacheable.key']) do
-            payload = MessagePack.dump(cache_data)
-            ResponseBank.write_to_backing_cache_store(
+            stored = CacheWriter.store(
               env,
-              env['cacheable.unversioned-key'],
-              payload,
-              expires_in: env['cacheable.versioned-cache-expiry'],
+              status: status,
+              headers: headers,
+              body: body_string,
+              timestamp: -> { timestamp },
+              content_encoding: content_encoding,
             )
-          end
 
-          # since we had to generate the compressed version already we may
-          # as well serve it if the client wants it
-          if body_compressed
-            if env['HTTP_ACCEPT_ENCODING'].to_s.include?(content_encoding)
-              if content_encoding == 'br'
-                body = [ResponseBank::BrotliSpliceSlot.replace_compressed_secret(env, body_compressed, metadata)]
+            if stored.compressed_body
+              if env['HTTP_ACCEPT_ENCODING'].to_s.include?(content_encoding)
+                headers['Content-Encoding'] = content_encoding
+                if content_encoding == 'br'
+                  body = [ResponseBank::BrotliSpliceSlot.replace_compressed_secret(env, stored.compressed_body, stored.metadata)]
+                else
+                  body = [stored.compressed_body]
+                end
               else
-                body = [body_compressed]
+                headers.delete('Content-Encoding')
+                body = [ResponseBank::BrotliSpliceSlot.replace_plain_body(env, stored.body, stored.metadata)] if stored.metadata
               end
-            else
-              # Remove content-encoding header for response with compressed content
-              headers.delete('Content-Encoding')
-              body = [ResponseBank::BrotliSpliceSlot.replace_plain_body(env, body_string, metadata)] if metadata
-            end
             end
           rescue => exception
-            headers.delete('Content-Encoding') if body_compressed
+            headers.delete('Content-Encoding') if stored&.compressed_body
             ResponseBank.log("Failed to write to cache: #{exception.class} - #{exception.message}")
             if env['response_bank.on_exception']
               begin
@@ -141,6 +105,5 @@ module ResponseBank
     def timestamp
       Time.now.to_i
     end
-
   end
 end

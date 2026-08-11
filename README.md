@@ -123,6 +123,32 @@ This gem supports the following versions of Ruby and Rails:
     end
     ```
 
+## Completing a deferred cache miss
+
+`ResponseBank::Middleware` can cache a body only when it is complete before the Rack tuple returns. An application that finishes a response later, such as through Rack partial hijack, can defer the cache write during a real ResponseBank miss:
+
+```ruby
+deferred_store = ResponseBank.defer_store(env)
+
+# Return the Rack response. Later, after the body was generated and written in full:
+cache_headers = headers.dup
+cache_headers.delete('Cache-Control') if cache_headers['Cache-Control'] == 'no-cache, no-store'
+deferred_store.complete(headers: cache_headers, body: completed_body)
+
+# Run this from the response-finished path. It is a no-op after completion.
+deferred_store.abort
+```
+
+`defer_store` is a cache-fill lifecycle API. Call it only from a ResponseBank cache-miss path after `ResponseCacheHandler` initialized the request and recorded logical fill-lock ownership. It raises if the request is not a GET cache miss, if required cache context is absent, or if another deferred store is already registered.
+
+The middleware arms the handle after the application returns the Rack tuple. It does not add an ETag to the live deferred response. `complete` copies and filters the final cache headers, adds the cached ETag and `Content-Encoding`, compresses the complete body, and writes the existing MessagePack cache format. It returns `true` when it stores and `false` when the request no longer owns an eligible fill.
+
+Call `complete` only after the intended response was generated and written successfully. Never call it from a rescue or ensure path. Do not complete failed, timed-out, disconnected, or truncated responses. The body must be the shared cache representation and must not contain client-specific data added for the live response.
+
+The headers passed to `complete` describe the cached representation. They can differ from headers already sent to the client. ResponseBank rejects final cache headers that contain `private` or `no-store`, and it does not mutate the supplied hash. It captures the cache timestamp when `defer_store` is called, before deferred rendering and compression.
+
+`abort` is idempotent and releases an owned fill lock through `ResponseBank.release_lock`. Its default implementation is a no-op. The existing `write_to_cache` hook remains responsible for cleanup after a write attempt. An integration that releases those fills from `write_to_cache` should also implement `release_lock` for abandoned fills and failures that happen before the write hook. A key-only lock cannot prevent an old fill from releasing a replacement lock after its lease expires; integrations that need that guarantee must use owner tokens in their lock implementation.
+
 ## Brotli Splice Slots
 
 Applications that need per-request replacement inside cached Brotli HTML responses can pass an injector builder to `ResponseBank::Middleware`:
