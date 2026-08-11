@@ -2,6 +2,7 @@
 require 'response_bank/brotli_splice_slot'
 require 'response_bank/cache_policy'
 require 'response_bank/cache_writer'
+require 'response_bank/deferred_store'
 
 module ResponseBank
   class Middleware
@@ -23,14 +24,21 @@ module ResponseBank
 
       content_encoding = env['response_bank.server_cache_encoding'] = ResponseBank.check_encoding(env)
 
-      status, headers, body = @app.call(env)
+      status, headers, body = begin
+        @app.call(env)
+      rescue StandardError
+        ResponseBank::DeferredStore.from_env(env)&.abort
+        raise
+      end
+      deferred_store = ResponseBank::DeferredStore.from_env(env)
+      ResponseBank::DeferredStore.arm_from_middleware(env, status: status, headers: headers)
 
       if env['cacheable.cache']
-        if [200, 404, 301, 304].include?(status)
+        if [200, 404, 301, 304].include?(status) && !deferred_store
           headers['ETag'] = %{"#{env['cacheable.key']}"}
         end
 
-        if CACHEABLE_STATUSES.include?(status) && env['cacheable.miss']
+        if CACHEABLE_STATUSES.include?(status) && env['cacheable.miss'] && !deferred_store
           body_string = CacheWriter.flatten(body)
           stored = nil
           begin

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 require 'digest/md5'
 require 'response_bank/brotli_splice_slot'
+require 'response_bank/deferred_store'
 
 module ResponseBank
   class ResponseCacheHandler
@@ -144,6 +145,7 @@ module ResponseBank
           if ResponseBank.acquire_lock(match_entity_tag)
             # execute if we can get the lock
             @env['cacheable.locked'] = true
+            @env[ResponseBank::DeferredStore::LOCK_OWNED_ENV_KEY] = true
             return
           elsif stale_while_revalidate?(timestamp, cache_age_tolerance)
             # cache is being regenerated, can we avoid piling on and use a stale version in the interim?
@@ -208,8 +210,10 @@ module ResponseBank
     end
 
     def refill_cache
-      # non cache hits do not yet have the lock
-      ResponseBank.acquire_lock(entity_tag_hash) unless @env['cacheable.locked']
+      unless @env['cacheable.locked']
+        acquired = ResponseBank.acquire_lock(entity_tag_hash)
+        @env[ResponseBank::DeferredStore::LOCK_OWNED_ENV_KEY] = !!acquired
+      end
       @env['cacheable.locked'] = true
       @env['cacheable.miss'] = true
 

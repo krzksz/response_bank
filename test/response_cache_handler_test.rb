@@ -101,6 +101,7 @@ class ResponseCacheHandlerTest < Minitest::Test
     _, _, body = handler.run!
     assert_equal('dynamic output', body)
     assert_cache_miss(true, nil)
+    assert_equal(true, controller.request.env[ResponseBank::DeferredStore::LOCK_OWNED_ENV_KEY])
   end
 
   def test_client_cache_hit
@@ -278,6 +279,7 @@ class ResponseCacheHandlerTest < Minitest::Test
     handler.run!
 
     assert_cache_miss(true, :anything)
+    assert_equal(false, controller.request.env[ResponseBank::DeferredStore::LOCK_OWNED_ENV_KEY])
   end
 
   def test_server_recent_cache_miss
@@ -345,9 +347,7 @@ class ResponseCacheHandlerTest < Minitest::Test
     assert_equal(true, controller.request.env['cacheable.cache'])
     assert_equal(miss, controller.request.env['cacheable.miss'])
 
-    if (miss)
-      assert_equal(true, controller.request.env['cacheable.locked'])
-    end
+    assert_equal(true, controller.request.env['cacheable.locked']) if miss
 
     if store.nil?
       assert_nil(controller.request.env['cacheable.store'])

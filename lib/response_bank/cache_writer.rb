@@ -17,7 +17,15 @@ module ResponseBank
         result
       end
 
-      def store(env, status:, headers:, body:, timestamp:, content_encoding:)
+      def store(
+        env,
+        status:,
+        headers:,
+        body:,
+        timestamp:,
+        content_encoding: env.fetch('response_bank.server_cache_encoding'),
+        before_write: nil
+      )
         cache_key = env.fetch('cacheable.key')
         unversioned_key = env.fetch('cacheable.unversioned-key')
         representation_headers = headers.slice(*ResponseBank::CACHEABLE_HEADERS)
@@ -26,6 +34,7 @@ module ResponseBank
         generated_at = timestamp.respond_to?(:call) ? timestamp.call : timestamp
         data = cache_data(status, representation_headers, stored, env, generated_at, content_encoding)
 
+        before_write&.call
         ResponseBank.write_to_cache(cache_key) do
           payload = MessagePack.dump(data)
           ResponseBank.write_to_backing_cache_store(
