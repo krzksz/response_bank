@@ -2,6 +2,12 @@
 require File.dirname(__FILE__) + "/test_helper"
 
 class ResponseBankCacheWriterTest < Minitest::Test
+  class RewritingBody < Array
+    def each
+      super { |part| yield("#{part}!") }
+    end
+  end
+
   def setup
     @original_cache_store = ResponseBank.cache_store
     ResponseBank.cache_store = ActiveSupport::Cache.lookup_store(:memory_store)
@@ -64,6 +70,34 @@ class ResponseBankCacheWriterTest < Minitest::Test
       [301, { 'Location' => 'http://shopify.com', 'ETag' => '"etag_value"' }, nil, 424242, nil],
       payload,
     )
+  end
+
+  def test_store_does_not_copy_a_single_chunk_body
+    chunk = 'Hi'
+
+    stored = cache_writer.store(
+      @env,
+      status: 200,
+      headers: {},
+      body: [chunk],
+      timestamp: 424242,
+      content_encoding: 'br',
+    )
+
+    assert_same(chunk, stored.body)
+  end
+
+  def test_store_enumerates_an_array_subclass
+    stored = cache_writer.store(
+      @env,
+      status: 200,
+      headers: {},
+      body: RewritingBody.new(['Hi']),
+      timestamp: 424242,
+      content_encoding: 'br',
+    )
+
+    assert_equal('Hi!', stored.body)
   end
 
   def test_store_keeps_only_cacheable_headers

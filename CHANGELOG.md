@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Content-Encoding` to the caller's live headers ([#112]).
 - Deferred completion requires logical fill-lock ownership recorded by
   `ResponseCacheHandler` ([#112]).
+- A one-element Rack body holding a String is no longer copied before it is
+  compressed. An Array subclass keeps the enumeration path, because it may
+  override `each` ([#112]).
 
 ## [1.3.8] - 2026-07-10
 

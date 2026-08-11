@@ -10,11 +10,15 @@ module ResponseBank
 
     class << self
       def flatten(body)
-        return body if body.is_a?(String)
-
-        result = +''
-        body.each { |part| result << part }
-        result
+        if body.is_a?(String)
+          body
+        elsif body.instance_of?(Array) && body.size == 1 && body[0].is_a?(String)
+          body[0]
+        else
+          result = +''
+          body.each { |part| result << part }
+          result
+        end
       end
 
       def store(
