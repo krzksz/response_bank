@@ -312,6 +312,17 @@ class MiddlewareTest < Minitest::Test
     assert(!headers['Content-Encoding'])
   end
 
+  def test_cache_writer_does_not_use_the_write_hook_return_value
+    ResponseBank.stubs(:write_to_cache).yields.returns(nil)
+
+    ware = ResponseBank::Middleware.new(method(:cacheable_app))
+    status, headers, body = ware.call(@env)
+
+    assert_equal(200, status)
+    assert_equal('br', headers['Content-Encoding'])
+    assert_equal('Hi', Brotli.inflate(body.first))
+  end
+
   def test_cache_miss_and_store_with_custom_brotli_compression_level_block
     ResponseBank.compression_level = ->(env, headers) { 1 }
     ResponseBank::Middleware.any_instance.stubs(timestamp: 424242)

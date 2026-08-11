@@ -1,6 +1,8 @@
 # frozen_string_literal: true
 require 'response_bank/brotli_splice_injector'
 require 'response_bank/brotli_splice_slot'
+require 'response_bank/cache_policy'
+require 'response_bank/cache_writer'
 require 'response_bank/middleware'
 require 'response_bank/railtie' if defined?(Rails)
 require 'response_bank/response_cache_handler'
@@ -9,6 +11,8 @@ require 'brotli'
 require 'benchmark'
 
 module ResponseBank
+  private_constant :CacheWriter
+
   class << self
     attr_accessor :cache_store
     attr_writer :logger, :compression_level

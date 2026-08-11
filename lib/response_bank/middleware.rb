@@ -1,12 +1,12 @@
 # frozen_string_literal: true
 require 'response_bank/brotli_splice_slot'
+require 'response_bank/cache_policy'
 require 'response_bank/cache_writer'
 
 module ResponseBank
   class Middleware
-    # Limit the cached headers
-    # TODO: Make this lowercase/case-insentitive as per rfc2616 §4.2
-    CACHEABLE_HEADERS = ["Location", "Content-Type", "ETag", "Content-Encoding", "Last-Modified", "Cache-Control", "Expires", "Link", "Surrogate-Keys", "Cache-Tags", "Speculation-Rules"].freeze
+    CACHEABLE_HEADERS = ResponseBank::CACHEABLE_HEADERS
+    CACHEABLE_STATUSES = ResponseBank::CACHEABLE_STATUSES
 
     REQUESTED_WITH = "HTTP_X_REQUESTED_WITH"
     ACCEPT = "HTTP_ACCEPT"
@@ -30,7 +30,7 @@ module ResponseBank
           headers['ETag'] = %{"#{env['cacheable.key']}"}
         end
 
-        if [200, 404, 301].include?(status) && env['cacheable.miss']
+        if CACHEABLE_STATUSES.include?(status) && env['cacheable.miss']
           body_string = CacheWriter.flatten(body)
           stored = nil
           begin
@@ -41,19 +41,17 @@ module ResponseBank
               body: body_string,
               timestamp: -> { timestamp },
               content_encoding: content_encoding,
-              cacheable_headers: CACHEABLE_HEADERS,
-              on_prepared: ->(result) { stored = result },
             )
 
             if stored.compressed_body
               if env['HTTP_ACCEPT_ENCODING'].to_s.include?(content_encoding)
+                headers['Content-Encoding'] = content_encoding
                 if content_encoding == 'br'
                   body = [ResponseBank::BrotliSpliceSlot.replace_compressed_secret(env, stored.compressed_body, stored.metadata)]
                 else
                   body = [stored.compressed_body]
                 end
               else
-                # Remove content-encoding header for response with compressed content
                 headers.delete('Content-Encoding')
                 body = [ResponseBank::BrotliSpliceSlot.replace_plain_body(env, stored.body, stored.metadata)] if stored.metadata
               end
@@ -99,6 +97,5 @@ module ResponseBank
     def timestamp
       Time.now.to_i
     end
-
   end
 end

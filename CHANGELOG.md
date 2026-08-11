@@ -5,6 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+- Cache writes build a separate cached-header hash instead of adding
+  `Content-Encoding` to the caller's live headers ([#112]).
+
 ## [1.3.8] - 2026-07-10
 
 ### Added
@@ -18,3 +24,4 @@ Releases prior to 1.3.8 are recorded in the project's git tags and GitHub Releas
 [1.3.8]: https://github.com/Shopify/response_bank/releases/tag/v1.3.8
 [#102]: https://github.com/Shopify/response_bank/pull/102
 [#103]: https://github.com/Shopify/response_bank/pull/103
+[#112]: https://github.com/Shopify/response_bank/pull/112
