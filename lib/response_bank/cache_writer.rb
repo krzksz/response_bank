@@ -5,6 +5,14 @@ require 'response_bank/cache_policy'
 require 'msgpack'
 
 module ResponseBank
+  EncodedBody = Struct.new(
+    :compressed_body,
+    :content_encoding,
+    :compression_level,
+    :metadata,
+    keyword_init: true,
+  )
+
   class CacheWriter
     Stored = Struct.new(:body, :compressed_body, :metadata, keyword_init: true)
 
@@ -25,16 +33,25 @@ module ResponseBank
         env,
         status:,
         headers:,
-        body:,
+        body: nil,
+        encoded: nil,
         timestamp:,
         content_encoding: env.fetch('response_bank.server_cache_encoding'),
         before_write: nil
       )
+        validate_body_choice!(body, encoded)
         cache_key = env.fetch('cacheable.key')
         unversioned_key = env.fetch('cacheable.unversioned-key')
         representation_headers = headers.slice(*ResponseBank::CACHEABLE_HEADERS)
         representation_headers['ETag'] = %{"#{cache_key}"}
-        stored = prepare_body(env, representation_headers, body, content_encoding)
+        if encoded
+          validate_encoded_body!(env, encoded)
+          env['cacheable.compression_level'] = encoded.compression_level
+          stored = Stored.new(body: nil, compressed_body: encoded.compressed_body, metadata: encoded.metadata)
+          content_encoding = encoded.content_encoding
+        else
+          stored = prepare_body(env, representation_headers, body, content_encoding)
+        end
         generated_at = timestamp.respond_to?(:call) ? timestamp.call : timestamp
         data = cache_data(status, representation_headers, stored, env, generated_at, content_encoding)
 
@@ -53,6 +70,27 @@ module ResponseBank
       end
 
       private
+
+      def validate_body_choice!(body, encoded)
+        return if body.nil? != encoded.nil?
+
+        raise ArgumentError, 'exactly one of body or encoded must be provided'
+      end
+
+      def validate_encoded_body!(env, encoded)
+        unless encoded.compressed_body.is_a?(String) && !encoded.compressed_body.empty?
+          raise ArgumentError, 'encoded compressed_body must be a non-empty String'
+        end
+        if encoded.metadata && encoded.content_encoding != 'br'
+          raise ArgumentError, 'Brotli splice metadata requires br content encoding'
+        end
+
+        expected_encoding = env.fetch('response_bank.server_cache_encoding')
+        return if encoded.content_encoding == expected_encoding
+
+        raise ArgumentError,
+          "encoded content encoding #{encoded.content_encoding.inspect} does not match #{expected_encoding.inspect}"
+      end
 
       def prepare_body(env, headers, body, content_encoding)
         body = flatten(body)

@@ -44,30 +44,37 @@ class ResponseCacheHandlerTest < Minitest::Test
     html = '<html><head><meta name="shopify-y" content="00000000-0000-0000-0000-000000000000##"></head><body>cached output</body></html>'
     placeholder_offset = html.index('00000000-0000-0000-0000-000000000000')
     result = BrotliSplice.encode(html, placeholder_offset, 38, quality: 7)
-    metadata = {
-      'brotli_splice' => {
-        'version' => 1,
-        'slots' => [
-          {
-            'name' => 'shopify_y',
-            'compressed_offset' => result[:secret_offset],
-            'replacement_length' => result[:secret_length],
-            'html_placeholder_offset' => placeholder_offset,
-            'html_placeholder_length' => 38,
-            'context_suffix' => result[:context_suffix],
-          },
-        ],
-      },
-    }
+    metadata = ResponseBank::BrotliSpliceSlot.metadata_for(
+      name: 'shopify_y',
+      compressed_offset: result[:secret_offset],
+      replacement_length: result[:secret_length],
+      html_placeholder_offset: placeholder_offset,
+      html_placeholder_length: 38,
+      context_suffix: result[:context_suffix],
+    )
+    env = Rack::MockRequest.env_for('http://example.com/')
+    env['response_bank.server_cache_encoding'] = 'br'
+    env['cacheable.key'] = etag
+    env['cacheable.unversioned-key'] = 'encoded-spliced-entry'
+    cache_store = ActiveSupport::Cache.lookup_store(:memory_store)
+    previous_cache_store = ResponseBank.cache_store
+    ResponseBank.cache_store = cache_store
 
-    MessagePack.dump([
-      200,
-      {"Content-Type" => "text/html", "ETag" => %{"#{etag}"}, "Content-Encoding" => 'br'},
-      result[:data],
-      1331765506,
-      7,
-      metadata,
-    ])
+    ResponseBank.const_get(:CacheWriter, false).store(
+      env,
+      status: 200,
+      headers: { 'Content-Type' => 'text/html' },
+      encoded: ResponseBank::EncodedBody.new(
+        compressed_body: result[:data],
+        content_encoding: 'br',
+        compression_level: 7,
+        metadata: metadata,
+      ),
+      timestamp: 1331765506,
+    )
+    cache_store.read('encoded-spliced-entry', raw: true)
+  ensure
+    ResponseBank.cache_store = previous_cache_store if previous_cache_store
   end
 
   def page_uncompressed(cache_hit = true)

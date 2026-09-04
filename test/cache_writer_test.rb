@@ -100,6 +100,88 @@ class ResponseBankCacheWriterTest < Minitest::Test
     assert_equal('Hi!', stored.body)
   end
 
+  def test_store_accepts_a_pre_encoded_body
+    metadata = { 'brotli_splice' => { 'version' => 1, 'slots' => [] } }
+    compressed_body = ResponseBank.compress('already compressed', 'br')
+    encoded = ResponseBank::EncodedBody.new(
+      compressed_body: compressed_body,
+      content_encoding: 'br',
+      compression_level: 5,
+      metadata: metadata,
+    )
+    ResponseBank.expects(:compress).never
+    ResponseBank.expects(:log).never
+
+    stored = cache_writer.store(
+      @env,
+      status: 200,
+      headers: { 'Content-Type' => 'text/html' },
+      encoded: encoded,
+      timestamp: 424242,
+    )
+
+    assert_nil(stored.body)
+    assert_equal(compressed_body, stored.compressed_body)
+    assert_equal(5, @env['cacheable.compression_level'])
+    payload = MessagePack.load(ResponseBank.cache_store.read('store_cache_key', raw: true))
+    assert_equal(
+      [
+        200,
+        { 'Content-Type' => 'text/html', 'ETag' => '"etag_value"', 'Content-Encoding' => 'br' },
+        compressed_body,
+        424242,
+        5,
+        metadata,
+      ],
+      payload,
+    )
+  end
+
+  def test_store_rejects_a_pre_encoded_body_with_the_wrong_encoding
+    encoded = ResponseBank::EncodedBody.new(
+      compressed_body: 'already compressed',
+      content_encoding: 'gzip',
+      compression_level: 5,
+    )
+
+    assert_raises(ArgumentError) do
+      cache_writer.store(@env, status: 200, headers: {}, encoded: encoded, timestamp: 424242)
+    end
+  end
+
+  def test_store_rejects_a_pre_encoded_body_without_bytes
+    encoded = ResponseBank::EncodedBody.new(content_encoding: 'br', compression_level: 5)
+
+    assert_raises(ArgumentError) do
+      cache_writer.store(@env, status: 200, headers: {}, encoded: encoded, timestamp: 424242)
+    end
+  end
+
+  def test_store_rejects_splice_metadata_for_non_brotli_encoding
+    encoded = ResponseBank::EncodedBody.new(
+      compressed_body: ResponseBank.compress('body', 'gzip'),
+      content_encoding: 'gzip',
+      compression_level: 9,
+      metadata: { 'brotli_splice' => { 'version' => 1, 'slots' => [] } },
+    )
+    @env['response_bank.server_cache_encoding'] = 'gzip'
+
+    assert_raises(ArgumentError) do
+      cache_writer.store(@env, status: 200, headers: {}, encoded: encoded, timestamp: 424242)
+    end
+  end
+
+  def test_store_requires_exactly_one_body_representation
+    encoded = ResponseBank::EncodedBody.new(content_encoding: 'br')
+
+    assert_raises(ArgumentError) do
+      cache_writer.store(@env, status: 200, headers: {}, timestamp: 424242)
+    end
+    assert_raises(ArgumentError) do
+      cache_writer.store(@env, status: 200, headers: {}, body: 'Hi', encoded: encoded, timestamp: 424242)
+    end
+  end
+
   def test_store_keeps_only_cacheable_headers
     cache_writer.store(
       @env,

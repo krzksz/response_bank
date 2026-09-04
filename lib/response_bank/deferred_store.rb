@@ -58,8 +58,9 @@ module ResponseBank
     end
 
     # `body` and `headers` must describe the complete shared cache representation,
-    # not a partial response or bytes personalized for the live client.
-    def complete(body:, headers: nil)
+    # not a partial response or bytes personalized for the live client. `encoded`
+    # must contain that complete representation with any slot placeholder applied.
+    def complete(body: nil, encoded: nil, headers: nil)
       status, cached_headers, release_lock = prepare_completion(headers)
 
       if release_lock
@@ -76,6 +77,7 @@ module ResponseBank
           status: status,
           headers: cached_headers,
           body: body,
+          encoded: encoded,
           timestamp: @timestamp,
           before_write: -> { write_started = true },
         )

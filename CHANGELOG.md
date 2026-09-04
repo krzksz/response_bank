@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - Unreleased
+
+### Added
+- `ResponseBank::EncodedBody` and deferred-store support for complete bodies that
+  callers compressed before cache storage.
+- `ResponseBank::BrotliSpliceSlot.metadata_for` for building splice metadata
+  without duplicating its stored schema.
+
 ## [1.4.0] - 2026-08-11
 
 ### Added
@@ -36,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Releases prior to 1.3.8 are recorded in the project's git tags and GitHub Releases.
 
+[1.5.0]: https://github.com/Shopify/response_bank/compare/v1.4.0...HEAD
 [1.4.0]: https://github.com/Shopify/response_bank/releases/tag/v1.4.0
 [1.3.8]: https://github.com/Shopify/response_bank/releases/tag/v1.3.8
 [#102]: https://github.com/Shopify/response_bank/pull/102
